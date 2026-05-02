@@ -1,0 +1,16 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: frontend-failure-schedule
+  namespace: prod
+spec:
+  schedule: "@every 30s"
+  historyLimit: 2
+  concurrencyPolicy: "Forbid"
+  type: "PodChaos"
+  podChaos:
+    action: pod-failure
+    mode: all
+    selector:
+      labelSelectors:
+        app: web-frontend

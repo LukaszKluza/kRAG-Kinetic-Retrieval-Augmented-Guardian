@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache-db
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache-db
+  template:
+    metadata:
+      labels:
+        app: cache-db
+    spec:
+      containers:
+      - name: cache-db
+        image: redis:alpine
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi

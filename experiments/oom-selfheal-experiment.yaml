@@ -1,0 +1,131 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krag-demo
+  labels:
+    experiment: krag-oom-selfheal
+    monitoring: enabled
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: krag-demo-quota
+  namespace: krag-demo
+spec:
+  hard:
+    requests.memory: "512Mi"
+    requests.cpu: "500m"
+    limits.memory: "1Gi"
+    limits.cpu: "1"
+    pods: "5"
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: crasher
+  namespace: krag-demo
+  labels:
+    app: crasher
+    experiment: krag-oom-selfheal
+spec:
+  serviceName: crasher
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crasher
+  template:
+    metadata:
+      labels:
+        app: crasher
+        experiment: krag-oom-selfheal
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: memory-worker
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - "python3"
+            - "-c"
+            - |
+              import time, sys, os
+
+              print('==================================================', flush=True)
+              print('  kRAG OOM Demo Worker v1.0', flush=True)
+              print('  Intentional memory leak — experiment target', flush=True)
+              print('==================================================', flush=True)
+              print(f'PID         : {os.getpid()}', flush=True)
+              print(f'Start time  : {time.strftime("%Y-%m-%d %H:%M:%S UTC")}', flush=True)
+              print(f'Leak rate   : 2 MB/second', flush=True)
+              print(f'Memory limit: 128 MiB (will OOMKill at ~50-60s)', flush=True)
+              print('', flush=True)
+              print('Starting leaky work loop...', flush=True)
+              print('WARNING: This pod WILL be OOMKilled intentionally!', flush=True)
+              print('', flush=True)
+
+              leak = []
+              start = time.time()
+
+              while True:
+                  leak.append('X' * 2_000_000)  # 2MB per iteration
+                  elapsed = int(time.time() - start)
+                  used_mb = len(leak) * 2
+
+                  if elapsed <= 5 or elapsed % 10 == 0:
+                      print(
+                          f'[{time.strftime("%H:%M:%S")}]'
+                          f' [MEMLEAK] Memory used: ~{used_mb}MB'
+                          f' | Elapsed: {elapsed}s'
+                          f' | Status: RUNNING',
+                          flush=True
+                      )
+
+                  time.sleep(1)
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crasher
+  namespace: krag-demo
+  labels:
+    app: crasher
+    experiment: krag-oom-selfheal
+spec:
+  clusterIP: None
+  selector:
+    app: crasher
+  ports:
+    - name: dummy
+      port: 8080
+      protocol: TCP
+
+---
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: krag-receiver
+  namespace: krag-demo
+  labels:
+    alertmanagerConfig: krag
+spec:
+  route:
+    receiver: krag-webhook
+    matchers:
+      - name: alertname
+        value: PodCrashLooping
+        matchType: "="
+  receivers:
+    - name: krag-webhook
+      webhookConfigs:
+        - url: "http://192.168.65.254:8888/webhook"
+          sendResolved: false

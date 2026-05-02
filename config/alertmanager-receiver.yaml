@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: krag-receiver
+  namespace: prod
+  labels:
+    alertmanagerConfig: krag
+spec:
+  route:
+    receiver: krag-webhook
+    matchers:
+      - name: alertname
+        value: "FrontendCPUHigh"
+        matchType: "=~"
+  receivers:
+    - name: krag-webhook
+      webhookConfigs:
+        - url: "http://192.168.65.254:8888/webhook"
+          sendResolved: false
