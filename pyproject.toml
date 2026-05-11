@@ -1,0 +1,14 @@
+[project]
+name = "krag-kinetic-retrieval-augmented-guardian"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "chromadb>=1.5.9",
+    "fastapi>=0.136.1",
+    "kubernetes>=35.0.0",
+    "langchain>=1.2.18",
+    "langchain-community>=0.4.1",
+    "langchain-openai>=1.2.1",
+]

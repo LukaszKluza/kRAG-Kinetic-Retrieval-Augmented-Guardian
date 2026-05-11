@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: ollama
+spec:
+  selector:
+    matchLabels:
+      name: ollama
+  template:
+    metadata:
+      labels:
+        name: ollama
+    spec:
+      initContainers:
+      - name: model-puller
+        image: ollama/ollama:latest
+        command: ["/bin/sh", "-c"]
+        args: ["ollama serve & sleep 15 && ollama pull llama3.2 && pkill ollama"]
+        volumeMounts:
+        - name: ollama-data
+          mountPath: /root/.ollama
+        resources:
+          requests: {memory: "8Gi"}
+          limits:   {memory: "12Gi"}
+      containers:
+      - name: ollama
+        image: ollama/ollama:latest
+        ports:
+        - containerPort: 11434
+        volumeMounts:
+        - name: ollama-data
+          mountPath: /root/.ollama
+        resources:
+          requests: {memory: "8Gi"}
+          limits:   {memory: "12Gi"}
+      volumes:
+      - name: ollama-data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: ollama
+spec:
+  selector:
+    name: ollama
+  ports:
+  - port: 80
+    targetPort: 11434

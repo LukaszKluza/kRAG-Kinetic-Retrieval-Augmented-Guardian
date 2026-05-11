@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: krag-chroma
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./chroma_data:/chroma/data
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/data
+
+  krag-agent:
+    build: .
+    container_name: krag-agent
+    ports:
+      - "8888:8888"
+    environment:
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - OLLAMA_URL=http://host.docker.internal:11434
+    volumes:
+      - .:/app
+      - ~/.kube/config:/root/.kube/config:ro
+    depends_on:
+      - chromadb
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

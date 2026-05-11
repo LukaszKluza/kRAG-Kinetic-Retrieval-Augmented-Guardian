@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: krag-pod-alert
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: krag.rules
+    rules:
+    - alert: PodCrashLooping
+      expr: |
+        increase(kube_pod_container_status_restarts_total[5m]) > 3
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} crashuje"
+        description: "Pod {{ $labels.pod }} w namespace {{ $labels.namespace }} zrestartował się >3 razy"
