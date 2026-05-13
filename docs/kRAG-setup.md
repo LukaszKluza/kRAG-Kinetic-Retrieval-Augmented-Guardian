@@ -1,6 +1,6 @@
 # kRAG — Instrukcja uruchomienia
 
-> **Stack:** kind · kubectl · Helm · Ollama · kagent · Prometheus · Alertmanager  
+> **Stack:** kind · kubectl · Helm · Ollama · kagent · Prometheus · Alertmanager
 > **Cel:** lokalny klaster K8s z autonomicznym agentem SRE reagującym na alerty
 
 ---
@@ -27,10 +27,11 @@
 ```
 kRAG/
 ├── config/
-│   ├── ollama.yaml          # Deployment + Service Ollamy w klastrze K8s
-│   ├── model-config.yaml    # ModelConfig — łączy kagent z Ollamą
-│   ├── alert-rule.yaml      # PrometheusRule — reguła alertu CrashLoopBackOff
-│   └── kagent.yaml          # Agent CRD — definicja agenta kRAG
+│   ├── ollama.yaml                  # Deployment + Service Ollamy w klastrze K8s
+│   ├── model-config.yaml            # ModelConfig — łączy kagent z Ollamą
+│   ├── alert-rule.yaml              # PrometheusRule — reguła alertu CrashLoopBackOff
+│   ├── kagent.yaml                  # Agent CRD — definicja agenta kRAG
+│   └── alertmanager-receiver.yaml   # AlertmanagerConfig — webhook do krag-agenta
 ├── src/
 │   ├── agent/
 │   │   ├── graph.py         # LangGraph — główna logika agenta
@@ -41,14 +42,16 @@ kRAG/
 │   │   └── server.py        # FastAPI — endpoint /webhook dla Alertmanagera
 │   └── data/
 │       └── ingest_docs.py   # Skrypt ładujący runbooki do ChromaDB
-├── docker-compose.yaml      # ChromaDB + krag-agent (webhook server)
+├── docker-compose.yaml      # ChromaDB + krag-agent (tryb produkcyjny)
 ├── Dockerfile
 └── pyproject.toml
 ```
 
 ---
 
-## Uruchomienie od zera (kolejność ma znaczenie)
+## CZĘŚĆ 1 — Wspólna infrastruktura K8s
+
+> Wykonujesz **raz**. Po zatrzymaniu klastra i wznowieniu (`docker unpause`) nie musisz tych kroków powtarzać — stan klastra jest zachowany.
 
 ### Krok 1 — Utwórz klaster
 
@@ -59,7 +62,7 @@ kubectl get nodes
 # Oczekiwany wynik: 1 node w statusie Ready
 ```
 
-### Krok 2 — Zainstaluj kagent
+### Krok 2 — Zainstaluj kagent CLI i framework
 
 ```bash
 # Linux/macOS
@@ -67,12 +70,22 @@ curl https://raw.githubusercontent.com/kagent-dev/kagent/refs/heads/main/scripts
 
 # Windows — pobierz ręcznie z GitHub Releases:
 # https://github.com/kagent-dev/kagent/releases
-# Umieść kagent.exe w katalogu projektu (bin/) lub w PATH
+# Umieść kagent.exe w PATH lub w katalogu projektu
+```
 
-# Zainstaluj framework do klastra (profil minimalny — bez domyślnych agentów)
+> **Uwaga:** kagent domyślnie wymaga `OPENAI_API_KEY`. Ponieważ używamy własnego
+> ModelConfig z Ollamą (Krok 5), wystarczy ustawić placeholder — klucz nie będzie używany.
+
+```bash
+# Windows (PowerShell)
+$env:OPENAI_API_KEY = "placeholder"
+
+# Linux/macOS
+export OPENAI_API_KEY=placeholder
+
+# Zainstaluj framework do klastra
 kagent install --profile minimal
 
-# Sprawdź że pody kagent działają
 kubectl get pods -n kagent
 # Oczekiwany wynik: kagent-controller i kagent-ui w statusie Running
 ```
@@ -80,40 +93,37 @@ kubectl get pods -n kagent
 ### Krok 3 — Zainstaluj Prometheus + Alertmanager
 
 ```bash
-helm repo add prometheus-community \
-  https://prometheus-community.github.io/helm-charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 
-helm install kube-prometheus \
-  prometheus-community/kube-prometheus-stack \
+helm install kube-prometheus prometheus-community/kube-prometheus-stack \
   --namespace monitoring --create-namespace
 
-# Poczekaj aż wszystkie pody będą Running (~2 min)
 kubectl get pods -n monitoring -w
+# Poczekaj aż wszystkie pody będą Running (~2 min)
 ```
 
-### Krok 4 — Deploy Ollamy do klastra
+### Krok 4 — Deploy Ollamy do klastra (dla kagent)
 
 ```bash
 kubectl create namespace ollama
 kubectl apply -f config/ollama.yaml
 
-# Poczekaj na init container (pobiera model llama3.2 ~4.7 GB — może trwać kilka minut)
 kubectl get pods -n ollama -w
+# Poczekaj na init container — pobiera model llama3.2 (~4.7 GB, może trwać kilka minut)
 # Oczekiwany wynik: ollama-... w statusie Running
 ```
 
-> Sprawdź postęp pobierania modelu:
-> ```bash
-> kubectl logs -n ollama -l name=ollama -c model-puller
-> ```
+```bash
+# Sprawdź postęp pobierania:
+kubectl logs -n ollama -l name=ollama -c model-puller
+```
 
 ### Krok 5 — Zastosuj konfigurację modelu
 
 ```bash
 kubectl apply -f config/model-config.yaml
 
-# Sprawdź czy ModelConfig jest gotowy
 kubectl get modelconfig -n kagent
 # Oczekiwany wynik: llama3-local z providerem Ollama
 ```
@@ -123,53 +133,73 @@ kubectl get modelconfig -n kagent
 ```bash
 kubectl apply -f config/alert-rule.yaml
 
-# Sprawdź że Prometheus widzi regułę
+# Weryfikacja — odpal port-forward i sprawdź w przeglądarce:
 kubectl port-forward -n monitoring svc/kube-prometheus-kube-prome-prometheus 9090:9090
-# Otwórz http://localhost:9090 → Status → Rules → szukaj "PodCrashLooping"
+# http://localhost:9090 → Status → Rules → szukaj "PodCrashLooping"
 ```
 
-### Krok 7 — Deploy agenta kRAG
+### Krok 7 — Deploy agenta kRAG (CRD)
 
 ```bash
 kubectl apply -f config/kagent.yaml
 
-# Sprawdź status agenta
 kubectl get agent -n kagent
 # Oczekiwany wynik: krag-agent w statusie Ready
 ```
 
-### Krok 8 — Otwórz UI kagent (opcjonalne)
+### Krok 8 — Skonfiguruj Alertmanager → webhook
+
+Plik `config/alertmanager-receiver.yaml` jest już gotowy w projekcie. Definiuje odbiorcę,
+który wysyła alerty `PodCrashLooping` do krag-agenta na porcie 8888.
+
+**Znajdź IP hosta widoczne z klastra kind:**
+
+```bash
+# Windows / macOS (Docker Desktop) — host.docker.internal działa automatycznie, pomiń ten krok
+
+# Linux — pobierz gateway IP sieci kind:
+docker network inspect kind | grep Gateway
+# Wpisz ten IP w config/alertmanager-receiver.yaml zamiast host.docker.internal
+```
+
+```bash
+kubectl apply -f config/alertmanager-receiver.yaml
+
+# Weryfikacja:
+kubectl get alertmanagerconfig -n monitoring
+```
+
+### Krok 9 — Otwórz UI kagent (opcjonalne)
 
 ```bash
 kubectl port-forward -n kagent svc/kagent-ui 8080:8080
-# Otwórz http://localhost:8080
+# http://localhost:8080
 ```
 
-### Krok 9 — Uruchamienie Dockerem bazy oraz agenta
+---
+
+## CZĘŚĆ 2A — Tryb deweloperski (zalecany)
+
+> Kod działa lokalnie z hot-reload. ChromaDB w Docker, Ollama lokalnie.
+> Wybierz **albo** tryb deweloperski, **albo** Docker (Część 2B) — nie oba jednocześnie.
+
+### Pierwsze uruchomienie
 
 ```bash
-docker-compose up --build
-
-# Uruchomienie skryptu zasilającego bazę wewnątrz kontenera (jeśli jeszcze nie był)
-docker exec -it krag-agent uv run python src/data/ingest_docs.py
-```
-
-### Krok 10 — Uruchomienie Agenta (Tryb Deweloperski)
-
-> **Wymaganie:** Ollama musi działać lokalnie (`ollama serve`).
-
-```bash
-# Pobierz modele potrzebne do działania agenta
+# 1. Pobierz modele Ollama (raz)
 ollama pull llama3.2
-ollama pull nomic-embed-text   # model embeddingów — wymagany przez rag.py
+ollama pull nomic-embed-text
 
-# Zainstaluj zależności Python przez uv (projekt NIE używa pip/requirements.txt)
+# 2. Zainstaluj zależności Python (raz)
 uv sync
 
-# Załaduj runbooki do ChromaDB (uruchom raz przed pierwszym startem agenta)
+# 3. Uruchom ChromaDB w tle
+docker-compose up chromadb -d
+
+# 4. Załaduj runbooki do bazy (raz — lub po dodaniu nowych runbooków)
 uv run python src/data/ingest_docs.py
 
-# Uruchom serwer webhook
+# 5. Uruchom serwer webhook
 # Windows (PowerShell):
 $env:PYTHONPATH = "src"
 uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
@@ -178,42 +208,89 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
 PYTHONPATH=src uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
 ```
 
-### Krok 11 — Skonfiguruj Alertmanager → webhook (integracja)
-
-Aby Alertmanager automatycznie wysyłał alerty do krag-agenta, utwórz receiver:
-
-```yaml
-# alertmanager-receiver.yaml
-apiVersion: monitoring.coreos.com/v1alpha1
-kind: AlertmanagerConfig
-metadata:
-  name: krag-receiver
-  namespace: monitoring
-  labels:
-    alertmanagerConfig: krag
-spec:
-  route:
-    receiver: krag-webhook
-    matchers:
-      - name: alertname
-        value: PodCrashLooping
-  receivers:
-    - name: krag-webhook
-      webhookConfigs:
-        # Jeśli krag-agent działa w Docker Compose na hoście:
-        # W kind użyj IP hosta (sprawdź: docker inspect krag-control-plane | grep Gateway)
-        - url: "http://<HOST_IP>:8888/webhook"
-```
+### Kolejne uruchomienia
 
 ```bash
-kubectl apply -f alertmanager-receiver.yaml
+docker-compose up chromadb -d
+
+# Windows (PowerShell):
+$env:PYTHONPATH = "src"
+uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
+
+# Linux/macOS:
+PYTHONPATH=src uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
 ```
 
-> **Uwaga:** Adres IP hosta w klastrze kind sprawdzisz przez:
-> ```bash
-> docker inspect krag-control-plane | findstr Gateway   # Windows
-> docker inspect krag-control-plane | grep Gateway      # Linux/macOS
-> ```
+### Zatrzymanie
+
+```bash
+# Ctrl+C w terminalu z uvicorn
+docker-compose stop chromadb
+```
+
+### Restart agenta (po zmianie kodu)
+
+Hot-reload (`--reload`) restartuje serwer automatycznie przy każdej zmianie pliku.
+Jeśli trzeba ręcznie: Ctrl+C, a następnie ponowne uruchomienie serwera.
+
+---
+
+## CZĘŚĆ 2B — Tryb produkcyjny (Docker Compose)
+
+> Cały stack (ChromaDB + krag-agent) w kontenerach.
+> Wybierz **albo** ten tryb, **albo** deweloperski (Część 2A) — nie oba jednocześnie.
+
+### Pierwsze uruchomienie
+
+```bash
+# Zbuduj i uruchom kontenery
+docker-compose up --build -d
+
+# Załaduj runbooki do bazy (raz)
+docker exec -it krag-agent uv run python src/data/ingest_docs.py
+```
+
+### Kolejne uruchomienia
+
+```bash
+docker-compose up -d
+```
+
+### Zatrzymanie
+
+```bash
+docker-compose down
+```
+
+### Restart po zmianie kodu
+
+```bash
+docker-compose up --build -d
+```
+
+### Restart tylko agenta (bez przebudowy)
+
+```bash
+docker-compose restart krag-agent
+```
+
+---
+
+## Klaster K8s — cykl życia
+
+```bash
+# Zatrzymaj klaster (dane zachowane, nie trzeba ponownie konfigurować)
+docker pause krag-control-plane
+
+# Wznów klaster
+docker unpause krag-control-plane
+
+# Sprawdź stan po wznowieniu
+kubectl get pods --all-namespaces
+
+# Usuń klaster całkowicie (wymaga ponownego przejścia przez Część 1)
+kind delete cluster --name krag
+```
 
 ---
 
@@ -222,16 +299,14 @@ kubectl apply -f alertmanager-receiver.yaml
 ### Test manualny — zasymuluj crashujący pod
 
 ```bash
-# Utwórz pod który zawsze się wysypuje
 kubectl run crash-test --image=busybox \
   --restart=Always -- /bin/sh -c "exit 1"
 
-# Obserwuj crashowanie
 kubectl get pods -w
 # Oczekiwany wynik: crash-test w CrashLoopBackOff
 ```
 
-### Wywołanie agenta
+### Wywołanie agenta bezpośrednio (kagent CLI)
 
 ```bash
 # Windows
@@ -264,9 +339,10 @@ kubectl delete pod crash-test
 | Problem | Polecenie diagnostyczne |
 |---------|------------------------|
 | Agent nie odpowiada | `kubectl logs -n kagent deployment/kagent-controller` |
-| Ollama nie startuje | `kubectl logs -n ollama -l name=ollama -c model-puller` |
+| Ollama (K8s) nie startuje | `kubectl logs -n ollama -l name=ollama -c model-puller` |
 | ModelConfig nie Ready | `kubectl describe modelconfig llama3-local -n kagent` |
 | Prometheus nie widzi alertu | `kubectl describe prometheusrule krag-pod-alert -n monitoring` |
+| Alertmanager nie wysyła webhooków | `kubectl describe alertmanagerconfig krag-receiver -n monitoring` |
 | kagent UI niedostępne | `kubectl get svc -n kagent` |
 | ChromaDB niedostępne | `docker logs krag-chroma` |
 | krag-agent (webhook) błędy | `docker logs krag-agent` |
@@ -277,23 +353,8 @@ kubectl delete pod crash-test
 echo "=== kagent ===" && kubectl get pods -n kagent
 echo "=== ollama ===" && kubectl get pods -n ollama
 echo "=== monitoring ===" && kubectl get pods -n monitoring
-echo "=== agent ===" && kubectl get agent -n kagent
+echo "=== agent CRD ===" && kubectl get agent -n kagent
 echo "=== model ===" && kubectl get modelconfig -n kagent
-```
-
----
-
-## Zatrzymanie i wznowienie
-
-```bash
-# Zatrzymaj klaster (nie kasuje danych)
-docker pause krag-control-plane
-
-# Wznów klaster
-docker unpause krag-control-plane
-
-# Lub całkowite usunięcie klastra
-kind delete cluster --name krag
 ```
 
 ---
@@ -302,5 +363,5 @@ kind delete cluster --name krag
 
 | Problem | Plik | Opis |
 |---------|------|------|
-| Brakujące zależności | `pyproject.toml` | Brak `langgraph`, `uvicorn`, `requests` — `uv sync` może nie zainstalować ich jako bezpośrednich zależności |
-| Wersja Pythona w Dockerfile | `Dockerfile` | Używa `python:3.11-slim`, podczas gdy projekt wymaga `>=3.13` |
+| Brakujące zależności | `pyproject.toml` | Brak `langgraph`, `uvicorn`, `requests` jako bezpośrednich zależności |
+| Wersja Pythona w Dockerfile | `Dockerfile` | Używa `python:3.11-slim`, projekt wymaga `>=3.13` |
