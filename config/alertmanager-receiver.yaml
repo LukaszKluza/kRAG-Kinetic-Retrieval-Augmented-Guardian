@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: krag-receiver
+  namespace: monitoring
+  labels:
+    alertmanagerConfig: krag
+spec:
+  route:
+    receiver: krag-webhook
+    matchers:
+      - name: alertname
+        value: PodCrashLooping
+        matchType: "="
+  receivers:
+    - name: krag-webhook
+      webhookConfigs:
+        # host.docker.internal działa automatycznie na Windows/macOS (Docker Desktop)
+        # Na Linuxie: zastąp adresem z `docker network inspect kind | grep Gateway`
+        - url: "http://host.docker.internal:8888/webhook"
+          sendResolved: false
