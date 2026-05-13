@@ -4,6 +4,7 @@ metadata:
   name: ollama
   namespace: ollama
 spec:
+  replicas: 1
   selector:
     matchLabels:
       name: ollama
@@ -16,13 +17,22 @@ spec:
       - name: model-puller
         image: ollama/ollama:latest
         command: ["/bin/sh", "-c"]
-        args: ["ollama serve & sleep 15 && ollama pull llama3.2 && pkill ollama"]
+        args: 
+          - |
+            ollama serve & 
+            until ollama list > /dev/null 2>&1; do sleep 2; done; 
+            ollama pull llama3.2 && 
+            pkill ollama
         volumeMounts:
         - name: ollama-data
           mountPath: /root/.ollama
         resources:
-          requests: {memory: "8Gi"}
-          limits:   {memory: "12Gi"}
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
       containers:
       - name: ollama
         image: ollama/ollama:latest
@@ -31,9 +41,19 @@ spec:
         volumeMounts:
         - name: ollama-data
           mountPath: /root/.ollama
+        readinessProbe:
+          httpGet:
+            path: /api/tags
+            port: 11434
+          initialDelaySeconds: 5
+          periodSeconds: 10
         resources:
-          requests: {memory: "8Gi"}
-          limits:   {memory: "12Gi"}
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
       volumes:
       - name: ollama-data
         emptyDir: {}
