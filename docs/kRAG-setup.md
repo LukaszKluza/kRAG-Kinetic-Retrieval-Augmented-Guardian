@@ -64,15 +64,6 @@ kubectl get nodes
 
 ### Krok 2 — Zainstaluj kagent CLI i framework
 
-```bash
-# Linux/macOS
-curl https://raw.githubusercontent.com/kagent-dev/kagent/refs/heads/main/scripts/get-kagent | bash
-
-# Windows — pobierz ręcznie z GitHub Releases:
-# https://github.com/kagent-dev/kagent/releases
-# Umieść kagent.exe w PATH lub w katalogu projektu
-```
-
 > **Uwaga:** kagent domyślnie wymaga `OPENAI_API_KEY`. Ponieważ używamy własnego
 > ModelConfig z Ollamą (Krok 5), wystarczy ustawić placeholder — klucz nie będzie używany.
 
@@ -96,8 +87,7 @@ kubectl get pods -n kagent
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 
-helm install kube-prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --create-namespace
+helm install kube-prometheus prometheus-community/kube-prometheus-stack --namespace monitoring --create-namespace
 
 kubectl get pods -n monitoring -w
 # Poczekaj aż wszystkie pody będą Running (~2 min)
@@ -116,7 +106,7 @@ kubectl get pods -n ollama -w
 
 ```bash
 # Sprawdź postęp pobierania:
-kubectl logs -n ollama -l name=ollama -c model-puller
+kubectl describe pod <NAME> -n ollama
 ```
 
 ### Krok 5 — Zastosuj konfigurację modelu
@@ -228,6 +218,9 @@ PYTHONPATH=src uv run uvicorn api.server:app --host 0.0.0.0 --port 8888 --reload
 docker-compose stop chromadb
 ```
 
+> Po zatrzymaniu port-forwardingów w konsolach, musisz odpalić odpowienie komendy ponownie przy restarcie.
+
+
 ### Restart agenta (po zmianie kodu)
 
 Hot-reload (`--reload`) restartuje serwer automatycznie przy każdej zmianie pliku.
@@ -299,8 +292,7 @@ kind delete cluster --name krag
 ### Test manualny — zasymuluj crashujący pod
 
 ```bash
-kubectl run crash-test --image=busybox \
-  --restart=Always -- /bin/sh -c "exit 1"
+kubectl run crash-test --image=busybox --restart=Always -- /bin/sh -c "exit 1"
 
 kubectl get pods -w
 # Oczekiwany wynik: crash-test w CrashLoopBackOff
@@ -309,13 +301,8 @@ kubectl get pods -w
 ### Wywołanie agenta bezpośrednio (kagent CLI)
 
 ```bash
-# Windows
-.\bin\kagent.exe invoke --agent krag-agent `
-  -t "Pod crash-test w namespace default ciągle się restartuje. Przeanalizuj i napraw."
-
-# Linux/macOS
-kagent invoke --agent krag-agent \
-  -t "Pod crash-test w namespace default ciągle się restartuje. Przeanalizuj i napraw."
+# Windows Linux/macOS
+kagent invoke --agent krag-agent -t "Pod crash-test w namespace default ciągle się restartuje. Przeanalizuj i napraw."
 ```
 
 ### Test webhooka (bez Alertmanagera)
