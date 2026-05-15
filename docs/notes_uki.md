@@ -25,23 +25,18 @@ kubectl delete deployments,services --all -n prod
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 ```
 
-
-
-	- --kubelet-insecure-tls  (wciącia rób spacją nie tab)
-  dodaj do args z kubectl edit deployment metrics-server -n kube-system
-
-#### ⚠️ Ważna Konfiguracja Ręczna: Metrics Server
+#### ⚠️ Ważna Konfiguracja: Metrics Server
 
 Aby poprawnie skonfigurować **Metrics Server** w środowiskach, gdzie certyfikaty Kubelet nie są podpisane przez zaufane CA (np. lokalne klastry deweloperskie, Minikube, Bare-metal), należy ręcznie zmodyfikować parametry deploymentu.
 
-##### 1. Otwarcie edycji zasobu 🛠
+##### 🛠️ Krok 1: Otwarcie edycji zasobu
 Wykonaj poniższe polecenie w terminalu, aby edytować deployment bezpośrednio na klastrze:
 
 ```bash
 kubectl edit deployment metrics-server -n kube-system
 ```
 
-### 🛠️ Krok 2: Modyfikacja sekcji `args`
+##### 🛠️ Krok 2: Modyfikacja sekcji `args`
 
 W otwartym edytorze odszukaj ścieżkę `spec.template.spec.containers` i przejdź do listy argumentów (`args`). Musisz tam dopisać flagę `--kubelet-insecure-tls`.
 
@@ -89,8 +84,11 @@ Przekierowanie portu, aby uzyskać dostęp do wizualizacji metryk.
 ```shell
 kubectl port-forward -n monitoring svc/kube-prometheus-grafana 3000:80
 ```
-**User**: admin
-**Password**: OvsKTFIjO7TwwQbeoLgY5P3Yjbd5Sk5HTQA88JMy
+
+
+> [!INFO]
+> **User**: admin
+> **Password**: OvsKTFIjO7TwwQbeoLgY5P3Yjbd5Sk5HTQA88JMy
 
 ---
 
@@ -111,15 +109,25 @@ kubectl get pods -n chaos-mesh
 
 ##### Wykonywanie Testów Obciążeniowych (Stress)
 
+
+##### Dostęp do Chaos Mesh'a
 ```shell
 kubectl port-forward -n chaos-mesh svc/chaos-dashboard 2333:2333
 ```
 
+##### Odpalenie scenariusza
 ```shell
 kubectl apply -f intensive-load.yaml
+```
+
+##### Usunięcia scenariusza po wykonaniu
+```
 kubectl delete stresschaos intensive-load-test -n prod
 ```
 
+
+> [!EXAMPLE]
+> Przykładowe Query dla Prometheus's, wylicza ono średnie zużycie procesowa przez pod'y frontendowe w ciągu ostatniej minuty.
 ```shell
 (
   avg by (pod) (rate(container_cpu_usage_seconds_total{namespace="prod", container="nginx"}[1m]))
