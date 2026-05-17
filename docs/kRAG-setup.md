@@ -278,6 +278,10 @@ docker pause krag-control-plane
 # Wznów klaster
 docker unpause krag-control-plane
 
+# Kind przy restarcie kontenera zmienia port losowo. Napraw kubeconfig jedną komendą
+
+kind export kubeconfig --name krag
+
 # Sprawdź stan po wznowieniu
 kubectl get pods --all-namespaces
 

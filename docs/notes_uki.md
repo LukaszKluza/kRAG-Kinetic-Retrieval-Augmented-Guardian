@@ -85,6 +85,14 @@ Przekierowanie portu, aby uzyskać dostęp do wizualizacji metryk.
 kubectl port-forward -n monitoring svc/kube-prometheus-grafana 3000:80
 ```
 
+Krok 1 — pobierz wartość (zakodowana base64)
+```sh
+kubectl get secret -n monitoring kube-prometheus-grafana -o jsonpath="{.data.admin-password}"
+```
+wynik: bnBvRjJkWnBWTDkyS3FJT0JIVHdlVUM4NGNRaHdHTkZLbmN5ZDhBZg==
+
+Krok 2 — zdekoduj base64 → plaintext
+wynik: npoF2dZpVL92KqIOBHTweUC84cQhwGNFKncyd8Af
 
 > [!INFO]
 > **User**: admin
