@@ -138,7 +138,9 @@ def node_reason(state: AgentState) -> AgentState:
     )
 
     logger.info("[reason] Sending prompt to LLM...")
+    logger.info(f"[reason] === PROMPT SENT TO LLM ===\n{prompt}\n=== END PROMPT ===")
     raw = call_llm(prompt)
+    logger.info(f"[reason] === LLM RAW RESPONSE ===\n{raw}\n=== END RESPONSE ===")
 
     try:
         plan = json.loads(raw)
@@ -154,7 +156,15 @@ def node_reason(state: AgentState) -> AgentState:
             "reasoning": "LLM did not return valid JSON, using fallback",
         }
 
-    logger.info(f"[reason] Plan: {plan.get('action')} on {plan.get('target')}")
+    logger.info(
+        f"[reason] === ACTION PLAN ===\n"
+        f"  root_cause : {plan.get('root_cause')}\n"
+        f"  action     : {plan.get('action')}\n"
+        f"  target     : {plan.get('target')}\n"
+        f"  namespace  : {plan.get('namespace')}\n"
+        f"  reasoning  : {plan.get('reasoning')}\n"
+        f"=== END PLAN ==="
+    )
     return {**state, "action_plan": plan}
 
 
@@ -201,13 +211,22 @@ def node_verify(state: AgentState) -> AgentState:
 
     pod_info = describe_pod(pod_name, namespace)
     prompt = build_verification_prompt(state["action_result"], pod_info)
+    logger.info("[verify] Asking LLM to confirm recovery...")
     raw = call_llm(prompt)
+    logger.info(f"[verify] === LLM VERIFICATION RESPONSE ===\n{raw}\n=== END ===")
     try:
         verification = json.loads(raw)
     except json.JSONDecodeError:
         verification = {"success": healthy, "reason": "auto-detect", "next_action": None}
 
-    logger.info(f"[verify] Healthy: {healthy}, LLM: {verification}")
+    logger.info(
+        f"[verify] === VERIFICATION RESULT ===\n"
+        f"  pod_healthy (k8s): {healthy}\n"
+        f"  llm_success      : {verification.get('success')}\n"
+        f"  reason           : {verification.get('reason')}\n"
+        f"  next_action      : {verification.get('next_action')}\n"
+        f"=== END RESULT ==="
+    )
     return {**state, "verification": verification, "success": healthy}
 
 
@@ -222,6 +241,7 @@ def node_store_memory(state: AgentState) -> AgentState:
         success=state["success"],
     )
     raw = call_llm(prompt)
+    logger.info(f"[store_memory] === LLM SUMMARY RESPONSE ===\n{raw}\n=== END ===")
     try:
         summary = json.loads(raw)
         doc_id = store_incident(
@@ -229,7 +249,13 @@ def node_store_memory(state: AgentState) -> AgentState:
             solution=summary["solution"],
             metadata={"alertname": state["alert"].get("alertname")},
         )
-        logger.info(f"[store_memory] Stored incident: {doc_id}")
+        logger.info(
+            f"[store_memory] === INCIDENT STORED IN CHROMADB ===\n"
+            f"  doc_id  : {doc_id}\n"
+            f"  problem : {summary.get('problem')}\n"
+            f"  solution: {summary.get('solution')}\n"
+            f"=== END ==="
+        )
     except Exception as e:
         logger.warning(f"[store_memory] Failed to store: {e}")
 
