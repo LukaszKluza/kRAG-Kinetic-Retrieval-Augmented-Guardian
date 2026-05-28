@@ -16,9 +16,17 @@ Testing with a sample alert:
 import logging
 import asyncio
 from fastapi import FastAPI, BackgroundTasks, Request
+import httpx
 from pydantic import BaseModel
-
-from agent.graph import run_agent
+import os
+import json
+from datetime import datetime
+import requests
+from a2a.client import A2ACardResolver  # noqa: PLC0415
+from a2a.client import ClientConfig, create_client  # noqa: PLC0415
+from a2a.helpers import new_text_message  # noqa: PLC0415
+from a2a.types.a2a_pb2 import Role, SendMessageRequest  # noqa: PLC0415
+from agent.graph import call_llm, run_agent
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,3 +154,83 @@ async def handle_alert_async(alert_dict: dict):
         )
     except Exception as e:
         logger.error(f"Error occurred while handling alert {alert_dict}: {e}", exc_info=True)
+
+
+@app.post("/dupa")
+def dupa(dupa: str):
+    OLLAMA_URL = "http://127.0.0.1:8083/api/sessions"
+
+    session_payload = {
+        "agent_ref": "kagent__NS__krag_agent"
+    }
+
+    response = requests.post(
+        f"{OLLAMA_URL}",
+        json=session_payload,
+    )
+    
+    response.raise_for_status()
+    session_data = response.json()
+    
+    # Wyciągamy ID sesji (zwróć uwagę na strukturę słownika z Twojego logu)
+    session_id = session_data["data"]["id"]
+    print(f"🎉 Utworzono sesję o ID: {session_id}")
+    
+    # KROK 2: Wysyłanie właściwej wiadomości do tej sesji
+    # Zazwyczaj endpoint w kAgent to: /api/sessions/{session_id}/messages lub /chats
+    # Sprawdź w docs, jeśli poniższy URL rzuci 404
+    url = "http://127.0.0.1:8080"
+
+    methods = ["chat", "invoke", "run", "message", "agent.run", "SendMessage"]
+
+    for m in methods:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": m,
+            "params": {
+                "message": "Cześć, sprawdź status klastra"
+            }
+        }
+
+        try:
+            r = requests.post(url, json=payload, timeout=20)
+            print("\nMETHOD:", m)
+            print("STATUS:", r.status_code)
+            print(r.text[:1000])
+        except Exception as e:
+            print("METHOD:", m, "ERROR:", e)
+            
+
+@app.post("/dupa1")
+async def dupa1(context: str = None):
+    OLLAMA_URL = "http://127.0.0.1:8083/api/sessions"
+    async with httpx.AsyncClient() as httpx_client:
+    
+        resolver = A2ACardResolver(
+                
+        httpx_client=httpx_client,
+                
+        base_url='http://127.0.0.1:8080',
+                
+        # Provide agent_card_path, if your agent uses a different path
+                
+        # agent_card_path=''  # noqa: ERA001
+            
+        )
+            
+        public_agent_card = await resolver.get_agent_card()
+    
+    print('\nInitializing a non-streaming client.')
+    config = ClientConfig(streaming=False)
+    client = await create_client(agent=public_agent_card, client_config=config)
+
+    # Creates a new text message to be sent to the A2A Server.
+    text_query = 'Why is the sky blue?'  # noqa: ERA001
+    message = new_text_message(text_query, role=Role.ROLE_USER, context_id=context)
+    request = SendMessageRequest(message=message)
+
+    print('Response:')
+    async for chunk in client.send_message(request):
+        print(chunk)
+            

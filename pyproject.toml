@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "a2a-sdk>=1.0.3",
     "chromadb>=1.5.9",
     "fastapi>=0.136.1",
     "kubernetes>=35.0.0",

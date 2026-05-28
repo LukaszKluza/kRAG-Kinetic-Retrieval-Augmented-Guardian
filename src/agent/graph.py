@@ -29,6 +29,7 @@ import json
 import time
 import logging
 import requests
+import operator
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 
@@ -49,8 +50,9 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434"           # locally
+# OLLAMA_URL = "http://localhost:11434"           # locally
 # OLLAMA_URL = "http://ollama.ollama.svc.cluster.local:80"  # in the cluster
+OLLAMA_URL = "http://127.0.0.1:8083/api/a2a/kagent/krag-agent/"
 LLM_MODEL = "llama3.2"
 MAX_RETRIES = 2  # how many times the agent can try to fix the issue before giving up
 
@@ -70,7 +72,7 @@ class AgentState(TypedDict):
     action_plan: dict                  # LLM decision (JSON)
     action_result: str                 # result of action execution
     verification: dict                 # verification result
-    retry_count: int                   # number of repair attempts
+    retry_count: Annotated[int, operator.add]                 # number of repair attempts
     success: bool                      # whether the issue was resolved
 
 
@@ -88,6 +90,59 @@ def call_llm(prompt: str) -> str:
     response.raise_for_status()
     return response.json()["response"]
 
+def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
+    KAGENT_A2A_URL = "http://127.0.0.1:8146/alert/"
+    
+    alert = state["alert"]
+
+    clean_alert = {k: v for k, v in alert.items() if v != 'unknown'}
+
+    alert_name = clean_alert.pop('alertname', 'unknown alert').lower()
+    severity = clean_alert.pop('severity', 'info').lower()
+    description = clean_alert.pop('description', 'no diagnostic description provided.')
+
+    reset_color = "\u001b[0m"
+    bold_white = "\u001b[1;37m"
+
+    if severity == "critical":
+        icon = "🔴"
+    elif severity == "warning":
+        icon = "🟡"
+    else:
+        icon = "🔵"
+
+    prompt_for_builtin = f"""# {icon} SRE Report: Diagnostic Action
+
+    ### 📌 Summary
+
+    *severity:* {severity}
+    *alert:    {alert_name}*
+
+    ### 🔬 Context & Resolution
+    {description}
+    """
+    
+    # prompt_for_builtin = (
+    #     f"SRE Task. Our local diagnostic system received an alert: {clean_alert}.\n"
+    # )
+    
+    try:
+        logger.info("[kagent-init] Przekazuję raport do wbudowanego krag-agent...")
+        query_params = {
+            "response": prompt_for_builtin
+        }
+        response = requests.post(
+            KAGENT_A2A_URL,
+            params=query_params,
+            timeout=10.0
+        )
+        logger.info(f"[kagent-bridge] Wbudowany agent odpowiedział: {response}")
+        
+    except Exception as e:
+        logger.error(f"[kagent-bridge] Nie udało się skomunikować z wbudowanym agentem: {e}")
+        
+    return state 
+
 
 def node_fetch_logs(state: AgentState) -> AgentState:
     """
@@ -103,7 +158,7 @@ def node_fetch_logs(state: AgentState) -> AgentState:
     logs = get_pod_logs(pod_name, namespace, tail=100)
     pod_info = describe_pod(pod_name, namespace)
 
-    return {**state, "logs": logs, "pod_info": pod_info}
+    return {"logs": logs, "pod_info": pod_info}
 
 
 def node_query_rag(state: AgentState) -> AgentState:
@@ -121,7 +176,7 @@ def node_query_rag(state: AgentState) -> AgentState:
 
     logger.info(f"[query_rag] Found: {len(past)} incidents, {len(books)} runbooks")
 
-    return {**state, "past_incidents": past, "runbooks": books}
+    return {"past_incidents": past, "runbooks": books}
 
 
 def node_reason(state: AgentState) -> AgentState:
@@ -155,7 +210,7 @@ def node_reason(state: AgentState) -> AgentState:
         }
 
     logger.info(f"[reason] Plan: {plan.get('action')} on {plan.get('target')}")
-    return {**state, "action_plan": plan}
+    return {"action_plan": plan}
 
 
 def node_execute(state: AgentState) -> AgentState:
@@ -182,7 +237,7 @@ def node_execute(state: AgentState) -> AgentState:
         logger.error(f"[execute] {result}")
 
     logger.info(f"[execute] Result: {result}")
-    return {**state, "action_result": result}
+    return {"action_result": result}
 
 
 def node_verify(state: AgentState) -> AgentState:
@@ -208,7 +263,16 @@ def node_verify(state: AgentState) -> AgentState:
         verification = {"success": healthy, "reason": "auto-detect", "next_action": None}
 
     logger.info(f"[verify] Healthy: {healthy}, LLM: {verification}")
-    return {**state, "verification": verification, "success": healthy}
+
+    dupa =  {
+        "verification": verification, 
+        "success": healthy,
+        "retry_count": 1
+    }
+
+    logger.error(f"[dupa] Updated state: {dupa}")
+
+    return dupa
 
 
 def node_store_memory(state: AgentState) -> AgentState:
@@ -241,37 +305,100 @@ def edge_should_retry(state: AgentState) -> str:
     After verification: should we retry, or terminate?
     Returns the name of the next node.
     """
-    if state["success"]:
-        return "store_memory"                           # success → store and finish
+    if state.get("success", False):
+        logger.info("[edge] Repair successful. Routing to store_memory.")
+        return "store_memory"
 
     retries = state.get("retry_count", 0)
+    logger.info(f"[edge DEBUG] Sprawdzam warunek pętli. Aktualny licznik: {retries}/{MAX_RETRIES}")
     if retries < MAX_RETRIES:
-        logger.info(f"[edge] Retry {retries + 1}/{MAX_RETRIES}")
-        state["retry_count"] = retries + 1
-        return "reason"                                 # try again with a new plan
+        logger.info(f"[edge] Condition failed. Retry {retries}/{MAX_RETRIES} -> Routing back to 'reason'")  
+        return "reason"
 
-    logger.warning("[edge] Exceeded MAX_RETRIES — giving up")
-    return END                                          # too many attempts → finish
+    logger.warning(f"[edge] Exceeded MAX_RETRIES ({MAX_RETRIES}) — giving up. Routing to fallback execution path.")
+    return "store_memory"                 
+
+
+def node_trigger_builtin_krag(state: AgentState) -> AgentState:
+    """
+    Węzeł, który bierze rozwiązanie z lokalnego modelu i pcha je do 
+    wbudowanego w klaster 'kagent', aby ten dokończył dzieła (np. powiadomił zespół).
+    """
+    KAGENT_A2A_URL = "http://127.0.0.1:8146/alert/"
+    
+    local_solution = state.get("action_result", "Brak szczegółów")
+    alert_name = state["alert"].get("alertname")
+    
+    prompt_for_builtin = (
+        f"SRE Task: Our local diagnostic system has resolved the issue with alert {alert_name}.\n"
+        f"Action summary: {local_solution}.\n"
+    )
+    
+    try:
+        logger.info("[kagent-bridge] Przekazuję raport do wbudowanego krag-agent...")
+        query_params = {
+            "response": prompt_for_builtin
+        }
+        response = requests.post(
+            KAGENT_A2A_URL,
+            params=query_params,
+            timeout=10.0
+        )
+        logger.info(f"[kagent-bridge] Wbudowany agent odpowiedział: {response}")
+        
+    except Exception as e:
+        logger.error(f"[kagent-bridge] Nie udało się skomunikować z wbudowanym agentem: {e}")
+        
+    return state 
 
 
 def build_graph():
     graph = StateGraph(AgentState)
 
+    graph.add_node("trigger_initial_message_kagent", node_trigger_alert_info_krag)
     graph.add_node("fetch_logs", node_fetch_logs)
     graph.add_node("query_rag", node_query_rag)
     graph.add_node("reason", node_reason)
     graph.add_node("execute", node_execute)
     graph.add_node("verify", node_verify)
     graph.add_node("store_memory", node_store_memory)
+    graph.add_node("trigger_kagent", node_trigger_builtin_krag)
 
-    graph.add_edge(START, "fetch_logs")
+    graph.add_edge(START, "trigger_initial_message_kagent")
+    graph.add_edge("trigger_initial_message_kagent", "fetch_logs")
     graph.add_edge("fetch_logs", "query_rag")
     graph.add_edge("query_rag", "reason")
     graph.add_edge("reason", "execute")
     graph.add_edge("execute", "verify")
 
-    graph.add_conditional_edges("verify", edge_should_retry)
-    graph.add_edge("store_memory", END)
+    graph.add_conditional_edges(
+        "verify", 
+        edge_should_retry,
+        {
+            "reason": "reason",
+            "store_memory": "store_memory"
+        }
+    )
+
+    graph.add_edge("store_memory", "trigger_kagent")
+    graph.add_edge("trigger_kagent", END)
+
+    try:
+        compiled_graph = graph.compile()
+        # Generuje piękny plik PNG przy użyciu wewnętrznego silnika Mermaid/PyGraphviz
+        png_bytes = compiled_graph.get_graph().draw_mermaid_png()
+        with open("krag_graph.png", "wb") as f:
+            f.write(png_bytes)
+        logger.info("[krag] Ostateczna wizualizacja grafu zapisana do pliku: krag_graph.png")
+    except Exception as e:
+        logger.warning(f"[krag] Nie udało się wygenerować obrazka (brak wymaganych bibliotek systemowych): {e}")
+        # Rezerwowy zapis do formatu tekstowego Mermaid (wklejasz na mermaid.live i masz wykres)
+        try:
+            with open("krag_graph.md", "w") as f:
+                f.write(f"```mermaid\n{graph.compile().get_graph().draw_mermaid()}\n```")
+            logger.info("[krag] Zapisano tekstowy schemat Mermaid do pliku: krag_graph.md")
+        except Exception:
+            pass
 
     return graph.compile()
 
