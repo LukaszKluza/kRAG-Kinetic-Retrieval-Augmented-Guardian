@@ -36,48 +36,40 @@ graph TB
         Prom -- "Metrics" --> AM
     end
 
-    Kagent{{"kagent.dev Core / LangGraph"}}
-
-    subgraph INT [Intelligence & Action Layer]
-        direction TB
-        subgraph LLM_S [LLM & RAG]
-            direction LR
-            Ollama[Ollama / Local LLM]
-            RAG[(Vector DB / Chroma)]
-        end
-        Tools[Action Toolbox / SDK]
-    end
+    kRag{{"LangGraph"}}
 
     subgraph CLUSTER [Kubernetes Cluster]
         direction TB
         Chaos[Chaos Mesh]
         Pods[Nodes / Pods]
-        Events[App Logs / Events]
+        RAG[( Chroma DB )]
+        subgraph LLM_S [kagent.dev]
+            direction LR
+            Ollama[Ollama]
+            DiscordAgent[Discord agent]
+        end
         
         Chaos -- "Inject Faults / Anomalies" --> Pods
     end
 
-    Events -- "Log Stream" --> Loki
+    Discord[Discord]
+
+    Pods -- "Log Stream" --> Loki
     Pods -- "Metrics Scrape" --> Prom
 
-    AM -- "1. Alert Webhook" --> Kagent
-    Loki -. "2. Log Context" .-> Kagent
+    AM -- "Alert Webhook" --> kRag
+    Loki -- "Log Context" --> kRag
 
-    Kagent -- "3a. Search Query" --> RAG
-    RAG -- "3b. Context / Docs" --> Kagent
+    RAG -- "Context / Docs" --> kRag
     
-    Kagent -- "4a. Reasoning Prompt" --> Ollama
-    Ollama -- "4b. Action Plan" --> Kagent
+    Ollama -- "Action Plan" --> kRag
+    DiscordAgent -- "Notifications" --> kRag
+    Discord -- "Messaging" --> DiscordAgent
     
-    Kagent -- "5. Dispatch Task" --> Tools
-
-    Tools -- "6. kubectl patch/restart" --> Pods
-
-    Pods -- "7. Status Check" --> Kagent
-    Kagent -- "8. Store Success Case" --> RAG
+    kRag -- "Dispatch Task" --> Pods
 
     class CLUSTER cluster;
-    class Kagent agent;
+    class kR agent;
     class Tools,LLM_S tools;
     class OBS obs;
 ```
