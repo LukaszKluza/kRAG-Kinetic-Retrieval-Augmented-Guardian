@@ -50,9 +50,9 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-# OLLAMA_URL = "http://localhost:11434"           # locally
+OLLAMA_URL = "http://localhost:11434"           # locally
 # OLLAMA_URL = "http://ollama.ollama.svc.cluster.local:80"  # in the cluster
-OLLAMA_URL = "http://127.0.0.1:8083/api/a2a/kagent/krag-agent/"
+# OLLAMA_URL = "http://127.0.0.1:8083/api/a2a/kagent/krag-agent/"
 LLM_MODEL = "llama3.2"
 MAX_RETRIES = 2  # how many times the agent can try to fix the issue before giving up
 
@@ -74,7 +74,11 @@ class AgentState(TypedDict):
     verification: dict                 # verification result
     retry_count: Annotated[int, operator.add]                 # number of repair attempts
     success: bool                      # whether the issue was resolved
+    kagent_session_id: str
 
+
+KAGENT_SESSION_URL = "http://127.0.0.1:8083/api/sessions"
+KAGENT_EXECUTE_URL = "http://127.0.0.1:8080" # Port wykonawczy kAgenta
 
 def call_llm(prompt: str) -> str:
     """Sends a prompt to Ollama and returns the response as a string."""
@@ -193,7 +197,7 @@ def node_reason(state: AgentState) -> AgentState:
     )
 
     logger.info("[reason] Sending prompt to LLM...")
-    raw = call_llm(prompt)
+    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
 
     try:
         plan = json.loads(raw)
@@ -256,7 +260,7 @@ def node_verify(state: AgentState) -> AgentState:
 
     pod_info = describe_pod(pod_name, namespace)
     prompt = build_verification_prompt(state["action_result"], pod_info)
-    raw = call_llm(prompt)
+    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
     try:
         verification = json.loads(raw)
     except json.JSONDecodeError:
@@ -264,15 +268,11 @@ def node_verify(state: AgentState) -> AgentState:
 
     logger.info(f"[verify] Healthy: {healthy}, LLM: {verification}")
 
-    dupa =  {
+    return {
         "verification": verification, 
         "success": healthy,
         "retry_count": 1
     }
-
-    logger.error(f"[dupa] Updated state: {dupa}")
-
-    return dupa
 
 
 def node_store_memory(state: AgentState) -> AgentState:
@@ -285,7 +285,7 @@ def node_store_memory(state: AgentState) -> AgentState:
         action=str(state["action_plan"]),
         success=state["success"],
     )
-    raw = call_llm(prompt)
+    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
     try:
         summary = json.loads(raw)
         doc_id = store_incident(
@@ -412,6 +412,20 @@ def run_agent(alert: dict) -> dict:
     alert = {"alertname": "PodCrashLooping", "pod": "crash-test",
               "namespace": "default", "description": "..."}
     """
+    session_id = "unknown"
+    
+    # 1. Rejestracja sesji w kAgent Session Manager (:8083)
+    try:
+        session_payload = {"agent_ref": "kagent__NS__krag_agent"}
+        resp = requests.post(KAGENT_SESSION_URL, json=session_payload, timeout=5.0)
+        resp.raise_for_status()
+        session_id = resp.json()["data"]["id"]
+        logger.info(f"[krag-init] 🎉 Pomyślnie zainicjalizowano sesję kAgenta: {session_id}")
+    except Exception as e:
+        logger.error(f"[krag-init] 🔥 Nie udało się stworzyć sesji w kAgencie: {e}. Używam fallback UUID.")
+        import uuid
+        session_id = f"fallback-{uuid.uuid4()}"
+
     initial_state: AgentState = {
         "alert": alert,
         "logs": "",
@@ -423,6 +437,7 @@ def run_agent(alert: dict) -> dict:
         "verification": {},
         "retry_count": 0,
         "success": False,
+        "kagent_session_id": session_id,
     }
 
     logger.info(f"[krag] START — alert: {alert.get('alertname')} / pod: {alert.get('pod')}")
