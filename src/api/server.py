@@ -24,7 +24,7 @@ from a2a.client import ClientConfig, create_client  # noqa: PLC0415
 from a2a.helpers import new_text_message  # noqa: PLC0415
 from a2a.types.a2a_pb2 import Role, SendMessageRequest  # noqa: PLC0415
 from a2a.server.context import ServerCallContext  # jeśli jest dostępny w SDK klienta
-from agent.graph import call_llm, run_agent
+from agent.graph import run_agent
 from google.protobuf.internal.containers import MessageMap
 import uuid
 
@@ -133,7 +133,7 @@ async def test_alert(request: Request):
     logger.info(f"Manual test: {alert_dict}")
 
     # For /test we run synchronously to see the result immediately
-    result = await asyncio.get_event_loop().run_in_executor(None, run_agent, alert_dict)
+    result = await run_agent(alert_dict)
 
     return {
         "status": "completed",
@@ -147,7 +147,7 @@ async def handle_alert_async(alert_dict: dict):
     """Runs the agent asynchronously (in a background task)."""
     try:
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, run_agent, alert_dict)
+        result = await run_agent(alert_dict)
         logger.info(
             f"Alert handled: {alert_dict['alertname']} | "
             f"success={result['success']} | "

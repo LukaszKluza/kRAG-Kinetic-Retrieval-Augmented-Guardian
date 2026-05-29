@@ -25,13 +25,20 @@ State graph (StateGraph) defines the decision flow:
 store_memory ──► [END]
 """
 
+import asyncio
 import json
 import time
 import logging
+import uuid
+import httpx
 import requests
 import operator
+from fastapi import Request
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
+from a2a.client import ClientConfig, create_client, A2ACardResolver
+from a2a.types.a2a_pb2 import Role, SendMessageRequest
+from a2a.helpers import new_text_message
 
 from agent.tools import (
     get_pod_logs,
@@ -80,7 +87,142 @@ class AgentState(TypedDict):
 KAGENT_SESSION_URL = "http://127.0.0.1:8083/api/sessions"
 KAGENT_EXECUTE_URL = "http://127.0.0.1:8080" # Port wykonawczy kAgenta
 
-def call_llm(prompt: str) -> str:
+
+def extract_text_aggressively(chunk):
+    """
+    Ekstrakcja tekstu niezależnie od tego, czy agent użył pól 'text', 'data' czy 'artifacts'.
+    """
+    try:
+        # 1. Przeszukaj historię (jeśli dostępna)
+        if hasattr(chunk, 'history'):
+            for h in chunk.history:
+                for part in h.parts:
+                    # Sprawdź 'text' (stary format)
+                    if hasattr(part, 'text') and part.text:
+                        return part.text
+                    # Sprawdź 'data' (nowy format struct_value)
+                    if hasattr(part, 'data') and part.data.struct_value:
+                        # Użyj .get() dla bezpiecznego dostępu do pól Protobufa
+                        fields = part.data.struct_value.fields
+                        if 'args' in fields:
+                            args = fields['args'].struct_value.fields
+                            if 'questions' in args:
+                                q_json = args['questions'].string_value
+                                return json.loads(q_json)[0]['question']
+                                
+        # 2. Przeszukaj artefakty (jeśli są w tasku)
+        if hasattr(chunk, 'task') and chunk.task.artifacts:
+            for art in chunk.task.artifacts:
+                for part in art.parts:
+                    if hasattr(part, 'text') and part.text:
+                        # Spróbuj sparsować, jeśli to JSON w tekście
+                        try:
+                            data = json.loads(part.text)
+                            return data['parameters']['questions'] # lub odpowiednia ścieżka
+                        except:
+                            return part.text
+    except Exception as e:
+        return f"Błąd parsowania: {e}"
+    
+    return None
+
+
+def extract_text_safely(chunk):
+    try:
+        # 1. Sprawdź, czy w ogóle jest obiekt message w chunku
+        if chunk.HasField('message'):
+            msg = chunk.message
+            # Jeśli to Protobuf, to może mieć listę 'content' lub 'parts'
+            if hasattr(msg, 'content'):
+                return str(msg.content)
+            if hasattr(msg, 'parts'):
+                return "".join([p.text for p in msg.parts if hasattr(p, 'text')])
+            return str(msg) # Ostateczność: zrzut obiektu
+            
+        # 2. Sprawdź, czy agent nie zwraca wyniku w polu 'task' (częste w A2A 0.3.0)
+        if chunk.HasField('task'):
+            return str(chunk.task)
+            
+    except Exception as e:
+        return f"Błąd parsowania: {e}"
+    return None
+    
+
+async def call_llm(prompt: str) -> str:
+    # 1. KONFIGURACJA
+    SESSION_MANAGER_URL = "http://127.0.0.1:8083/api/sessions"
+    PROXY_KAGENT_URL = "http://127.0.0.1:8080"
+    
+    # GENERUJEMY ID SESJI I WŁAŚCIWEGO UŻYTKOWNIKA BRAMY
+    forced_session_id = f"ctx-{uuid.uuid4()}"
+    forced_brama_user = f"A2A_USER_{forced_session_id}"
+    
+    # 2. ZAPISUJEMY SESJĘ W BAZIE
+    async with httpx.AsyncClient() as init_client:
+        session_payload = {
+            "id": forced_session_id,
+            "agent_ref": "kagent__NS__krag_agent",
+            "user_id": forced_brama_user
+        }
+        
+        headers_for_8083 = {
+            "X-User-Id": forced_brama_user,
+            "X-Authenticated-Userid": forced_brama_user,
+            "X-Forwarded-User": forced_brama_user,
+            "kagent-user-id": forced_brama_user,
+            "Authorization": f"Bearer {forced_brama_user}",
+            "Content-Type": "application/json"
+        }
+
+        session_resp = await init_client.post(
+            SESSION_MANAGER_URL, 
+            json=session_payload, 
+            headers=headers_for_8083, 
+            timeout=10.0
+        )
+        session_resp.raise_for_status()
+        session_data = session_resp.json()
+        saved_session_id = session_data["data"]["id"]
+        logger.info(f"[krag] 💥 Baza zsynchronizowana -> ID: {saved_session_id}")
+
+    # 3. POBIERAMY KARTĘ AGENTA
+    async with httpx.AsyncClient() as metadata_client:
+        resolver = A2ACardResolver(httpx_client=metadata_client, base_url=PROXY_KAGENT_URL)
+        real_agent_card = await resolver.get_agent_card()
+
+    # 4. STRZAŁ PO ODPOWIEDŹ Z WYDŁUŻONYM TIMEOUTEM
+    async with httpx.AsyncClient(base_url=PROXY_KAGENT_URL, timeout=180.0) as rpc_http_client:
+        config = ClientConfig(streaming=False)
+        client = await create_client(agent=real_agent_card, client_config=config)
+        
+        if hasattr(client, '_transport') and hasattr(client._transport, 'httpx_client'):
+            client._transport.httpx_client = rpc_http_client
+        
+        message = new_text_message(prompt, role=Role.ROLE_USER)
+        message.context_id = saved_session_id
+        req = SendMessageRequest(message=message)
+        
+        logger.info(f"[krag] ⏳ Agent myśli... (timeout 180s)...")
+        
+        raw_chunks = []
+        async for chunk in client.send_message(req):
+            found_text = extract_text_aggressively(chunk)
+            if isinstance(found_text, list):
+                found_text = "".join([str(x) for x in found_text])
+            
+            if found_text:
+                raw_chunks.append(str(found_text))
+                
+        agent_response_text = "".join(raw_chunks).strip()
+        
+        if not agent_response_text:
+            agent_response_text = "Odebrano puste chunki lub brak pola tekstowego."
+
+        logger.info(f"[krag] ✅ SUKCES OSTATECZNY!")
+        return agent_response_text
+
+
+def call_llm_ollama(prompt: str) -> str:
     """Sends a prompt to Ollama and returns the response as a string."""
     response = requests.post(
         f"{OLLAMA_URL}/api/generate",
@@ -93,6 +235,7 @@ def call_llm(prompt: str) -> str:
     )
     response.raise_for_status()
     return response.json()["response"]
+
 
 def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
     KAGENT_A2A_URL = "http://127.0.0.1:8146/alert/"
@@ -183,7 +326,7 @@ def node_query_rag(state: AgentState) -> AgentState:
     return {"past_incidents": past, "runbooks": books}
 
 
-def node_reason(state: AgentState) -> AgentState:
+async def node_reason(state: AgentState) -> AgentState:
     """
     Node 3: LLM analyzes all the data and decides what to do.
     Receives: alert + logs + history + runbooks → returns action plan.
@@ -197,7 +340,7 @@ def node_reason(state: AgentState) -> AgentState:
     )
 
     logger.info("[reason] Sending prompt to LLM...")
-    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
+    raw = await call_llm(prompt)
 
     try:
         plan = json.loads(raw)
@@ -244,7 +387,7 @@ def node_execute(state: AgentState) -> AgentState:
     return {"action_result": result}
 
 
-def node_verify(state: AgentState) -> AgentState:
+async def node_verify(state: AgentState) -> AgentState:
     """
     Node 5: Waits a moment and checks if the pod has recovered.
     If not — increments retry_count (edge decides whether to try again).
@@ -260,7 +403,7 @@ def node_verify(state: AgentState) -> AgentState:
 
     pod_info = describe_pod(pod_name, namespace)
     prompt = build_verification_prompt(state["action_result"], pod_info)
-    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
+    raw = await call_llm(prompt)
     try:
         verification = json.loads(raw)
     except json.JSONDecodeError:
@@ -275,7 +418,7 @@ def node_verify(state: AgentState) -> AgentState:
     }
 
 
-def node_store_memory(state: AgentState) -> AgentState:
+async def node_store_memory(state: AgentState) -> AgentState:
     """
     Node 6: Stores the resolved incident in ChromaDB.
     Called ONLY when the repair is successful.
@@ -285,7 +428,7 @@ def node_store_memory(state: AgentState) -> AgentState:
         action=str(state["action_plan"]),
         success=state["success"],
     )
-    raw = call_llm(prompt, session_id=state.get("kagent_session_id"))
+    raw = await call_llm(prompt)
     try:
         summary = json.loads(raw)
         doc_id = store_incident(
@@ -406,7 +549,7 @@ def build_graph():
 krag_graph = build_graph()
 
 
-def run_agent(alert: dict) -> dict:
+async def run_agent(alert: dict) -> dict:
     """
     Public API — invoke the agent with an alert.
     alert = {"alertname": "PodCrashLooping", "pod": "crash-test",
@@ -441,6 +584,6 @@ def run_agent(alert: dict) -> dict:
     }
 
     logger.info(f"[krag] START — alert: {alert.get('alertname')} / pod: {alert.get('pod')}")
-    final_state = krag_graph.invoke(initial_state)
+    final_state = await krag_graph.ainvoke(initial_state)
     logger.info(f"[krag] END — success: {final_state['success']}")
     return final_state
