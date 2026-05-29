@@ -59,16 +59,24 @@ Do not ask the user for anything. Fetch missing data and make decisions.
 
 ## Your Task:
 1. Identify the root cause of the problem
-2. Choose a remediation action from: [delete_pod, restart_deployment, scale_deployment]
-3. Justify your choice
+2. Choose the best remediation action. CRITICAL target naming rules:
+   - delete_pod      → target MUST be the POD name from the Alert section above (e.g. "crasher-0").
+                       K8s will auto-recreate it via its owner workload.
+                       Use this for OOMKilled or stuck pods — it resets accumulated state.
+   - restart_deployment → target MUST be the workload name from pod_info["owner_workload"]["name"]
+                          (e.g. "crasher"). Do NOT use the container name (e.g. "memory-worker").
+   - scale_deployment   → target MUST be the workload name from pod_info["owner_workload"]["name"].
+                          WARNING: scaling does NOT fix OOMKill — each new replica will also
+                          run out of memory. Only use if the fix is distributing load.
+3. For OOMKilled pods: prefer delete_pod — it gives the pod a clean memory slate immediately.
 
 Answer ONLY in JSON format:
 {{
   "root_cause": "short description of the cause",
   "action": "delete_pod|restart_deployment|scale_deployment",
-  "target": "name of the pod or deployment",
+  "target": "pod name (for delete_pod) OR workload name from owner_workload (for restart/scale)",
   "namespace": "namespace",
-  "replicas": 3,  // only for scale_deployment
+  "replicas": 3,
   "reasoning": "why this action"
 }}"""
 

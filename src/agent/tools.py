@@ -45,12 +45,19 @@ def get_pod_logs(pod_name: str, namespace: str = "default", tail: int = 100) -> 
 
 
 def describe_pod(pod_name: str, namespace: str = "default") -> dict:
-    """Returns details about a pod: status, events, restarts, reason."""
+    """Returns details about a pod: status, events, restarts, reason, and owner workload."""
     try:
         pod = v1.read_namespaced_pod(name=pod_name, namespace=namespace)
         statuses = pod.status.container_statuses or []
+        owners = [
+            {"kind": ref.kind, "name": ref.name}
+            for ref in (pod.metadata.owner_references or [])
+        ]
         return {
             "phase": pod.status.phase,
+            # owner_workload is the Deployment/StatefulSet name — use this as target
+            # for restart_deployment and scale_deployment actions, NOT the container name
+            "owner_workload": owners[0] if owners else None,
             "containers": [
                 {
                     "name": cs.name,
@@ -101,28 +108,36 @@ def delete_pod(pod_name: str, namespace: str = "default") -> str:
 
 def restart_deployment(deployment_name: str, namespace: str = "default") -> str:
     """
-    Performs a rolling restart of the deployment — equivalent to
-    'kubectl rollout restart deployment/<name>'.
+    Performs a rolling restart of a Deployment or StatefulSet — equivalent to
+    'kubectl rollout restart deployment/<name>' or 'kubectl rollout restart statefulset/<name>'.
+    Tries Deployment first, then falls back to StatefulSet.
     """
     import datetime
-    try:
-        patch = {
-            "spec": {
-                "template": {
-                    "metadata": {
-                        "annotations": {
-                            "kubectl.kubernetes.io/restartedAt": datetime.datetime.utcnow().isoformat()
-                        }
+    patch = {
+        "spec": {
+            "template": {
+                "metadata": {
+                    "annotations": {
+                        "kubectl.kubernetes.io/restartedAt": datetime.datetime.utcnow().isoformat()
                     }
                 }
             }
         }
+    }
+    try:
         apps_v1.patch_namespaced_deployment(
             name=deployment_name, namespace=namespace, body=patch
         )
         return f"Deployment {deployment_name} restarted."
+    except ApiException:
+        pass
+    try:
+        apps_v1.patch_namespaced_stateful_set(
+            name=deployment_name, namespace=namespace, body=patch
+        )
+        return f"StatefulSet {deployment_name} restarted (pods will be recreated with stable names)."
     except ApiException as e:
-        return f"ERROR restarting deployment: {e.reason}"
+        return f"ERROR restarting {deployment_name}: {e.reason}"
 
 
 def scale_deployment(deployment_name: str, replicas: int, namespace: str = "default") -> str:

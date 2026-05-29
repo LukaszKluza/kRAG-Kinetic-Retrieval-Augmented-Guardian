@@ -1,0 +1,191 @@
+# =============================================================================
+# kRAG OOM Self-Healing Experiment
+# =============================================================================
+#
+# SCENARIO:
+#   A Python worker service has a memory leak (2MB/sec).
+#   After ~50s the container hits its 128Mi limit and is OOMKilled by Kubernetes.
+#   CrashLoopBackOff develops over the next 3-4 minutes.
+#   Prometheus detects 3+ restarts → fires PodCrashLooping alert.
+#   Alertmanager routes the alert via webhook to the kRAG FastAPI server.
+#   The kRAG LangGraph agent:
+#     1. Fetches logs from crasher-0         (shows OOMKill history)
+#     2. Queries ChromaDB for similar cases  (OOM runbooks)
+#     3. Calls Ollama LLM for diagnosis      (root cause + action plan)
+#     4. Executes the action                 (delete_pod or restart_deployment)
+#     5. Waits 30s and verifies health       (fresh pod = no accumulated memory)
+#     6. Stores the resolved incident        (in ChromaDB for future learning)
+#
+# WHY StatefulSet?
+#   StatefulSets guarantee stable pod names (crasher-0).
+#   After kRAG deletes crasher-0, the StatefulSet controller recreates it
+#   under the SAME name. This lets is_pod_healthy("crasher-0") correctly
+#   verify the fresh pod — unlike Deployments which generate new random names.
+#
+# WHY NO auto-repair problem here?
+#   Kubernetes DOES restart the pod automatically (CrashLoopBackOff) — but with
+#   exponential backoff delays (10s, 20s, 40s, 80s, 160s...). These delays give
+#   Prometheus time to detect the failures and fire an alert before the pod
+#   recovers. kRAG's intervention (delete_pod / restart_deployment) bypasses
+#   the backoff and creates a FRESH pod immediately, which is what makes the
+#   verification succeed — the fresh pod hasn't leaked memory yet.
+#
+# EXPECTED TIMELINE:
+#   T+00s   Pod crasher-0 starts, begins leaking memory (2MB/sec)
+#   T+50s   OOMKilled (hits 128Mi limit), CrashLoopBackOff begins
+#   T+60s   Restart #1 → OOM again → restart #2 → ...
+#   T+4min  Restart count reaches 3, Prometheus alert enters PENDING
+#   T+5min  Alert becomes FIRING, Alertmanager sends webhook to kRAG
+#   T+5min  kRAG receives alert, begins LangGraph workflow
+#   T+7min  kRAG executes action (delete_pod or restart_deployment)
+#   T+7m30s kRAG verifies: fresh pod running, only ~60MB used → HEALTHY
+#   T+7m30s kRAG stores resolved incident in ChromaDB → DONE
+#
+# APPLY ORDER:
+#   1. kubectl apply -f config/alert-rule.yaml         (Prometheus rule)
+#   2. kubectl apply -f experiments/oom-selfheal-experiment.yaml  (this file)
+# =============================================================================
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: krag-demo
+  labels:
+    experiment: krag-oom-selfheal
+    monitoring: enabled
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: krag-demo-quota
+  namespace: krag-demo
+spec:
+  hard:
+    requests.memory: "512Mi"
+    requests.cpu: "500m"
+    limits.memory: "1Gi"
+    limits.cpu: "1"
+    pods: "5"
+
+---
+# StatefulSet gives crasher-0 a stable, predictable name across restarts.
+# kRAG's is_pod_healthy("crasher-0", "krag-demo") will find the fresh pod
+# after any delete_pod or restart action — this is the key design choice.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: crasher
+  namespace: krag-demo
+  labels:
+    app: crasher
+    experiment: krag-oom-selfheal
+spec:
+  serviceName: crasher
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crasher
+  template:
+    metadata:
+      labels:
+        app: crasher
+        experiment: krag-oom-selfheal
+    spec:
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: memory-worker
+          image: python:3.11-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - "python3"
+            - "-c"
+            - |
+              import time, sys, os
+
+              print('==================================================', flush=True)
+              print('  kRAG OOM Demo Worker v1.0', flush=True)
+              print('  Intentional memory leak — experiment target', flush=True)
+              print('==================================================', flush=True)
+              print(f'PID         : {os.getpid()}', flush=True)
+              print(f'Start time  : {time.strftime("%Y-%m-%d %H:%M:%S UTC")}', flush=True)
+              print(f'Leak rate   : 2 MB/second', flush=True)
+              print(f'Memory limit: 128 MiB (will OOMKill at ~50-60s)', flush=True)
+              print('', flush=True)
+              print('Starting leaky work loop...', flush=True)
+              print('WARNING: This pod WILL be OOMKilled intentionally!', flush=True)
+              print('', flush=True)
+
+              leak = []
+              start = time.time()
+
+              while True:
+                  leak.append('X' * 2_000_000)  # 2MB per iteration
+                  elapsed = int(time.time() - start)
+                  used_mb = len(leak) * 2
+
+                  # Log every second for first 5 seconds, then every 10 seconds
+                  if elapsed <= 5 or elapsed % 10 == 0:
+                      print(
+                          f'[{time.strftime("%H:%M:%S")}]'
+                          f' [MEMLEAK] Memory used: ~{used_mb}MB'
+                          f' | Elapsed: {elapsed}s'
+                          f' | Status: RUNNING',
+                          flush=True
+                      )
+
+                  time.sleep(1)
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+---
+# Headless service is required by StatefulSets.
+# clusterIP: None makes it headless (DNS only, no load balancing).
+apiVersion: v1
+kind: Service
+metadata:
+  name: crasher
+  namespace: krag-demo
+  labels:
+    app: crasher
+    experiment: krag-oom-selfheal
+spec:
+  clusterIP: None
+  selector:
+    app: crasher
+  ports:
+    - name: dummy
+      port: 8080
+      protocol: TCP
+
+---
+# AlertmanagerConfig MUST live in the same namespace as the alerts it handles.
+# The Prometheus Operator automatically injects a namespace="krag-demo" matcher
+# into routes defined here, which matches our crasher-0 alert labels exactly.
+# Placing this in "monitoring" namespace would inject namespace="monitoring" and
+# the route would never match our krag-demo alerts — that is the common trap.
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: krag-receiver
+  namespace: krag-demo
+  labels:
+    alertmanagerConfig: krag
+spec:
+  route:
+    receiver: krag-webhook
+    matchers:
+      - name: alertname
+        value: PodCrashLooping
+        matchType: "="
+  receivers:
+    - name: krag-webhook
+      webhookConfigs:
+        - url: "http://192.168.65.254:8888/webhook"
+          sendResolved: false
