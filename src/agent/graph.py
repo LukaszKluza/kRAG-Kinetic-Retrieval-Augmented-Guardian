@@ -58,51 +58,35 @@ from agent.prompts import (
 logger = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434"           # locally
-# OLLAMA_URL = "http://ollama.ollama.svc.cluster.local:80"  # in the cluster
-# OLLAMA_URL = "http://127.0.0.1:8083/api/a2a/kagent/krag-agent/"
+SESSION_MANAGER_URL = "http://127.0.0.1:8083/api/sessions"
+PROXY_KAGENT_URL = "http://127.0.0.1:8080"
 LLM_MODEL = "llama3.2"
-MAX_RETRIES = 2  # how many times the agent can try to fix the issue before giving up
+MAX_RETRIES = 2 
 
-
-# TypedDict defines what is passed between nodes.
-# Each node receives the full state and can enrich it.
 
 class AgentState(TypedDict):
-    # Output
-    alert: dict                        # raw alert from Alertmanager
+    alert: dict                   
 
-    # Collected by nodes
-    logs: str                          # logs from the crashing pod
-    pod_info: dict                     # describe_pod()
-    past_incidents: list[dict]         # results from ChromaDB
-    runbooks: list[dict]               # runbooks from ChromaDB
-    action_plan: dict                  # LLM decision (JSON)
-    action_result: str                 # result of action execution
-    verification: dict                 # verification result
-    retry_count: Annotated[int, operator.add]                 # number of repair attempts
-    success: bool                      # whether the issue was resolved
+    logs: str                       
+    pod_info: dict                     
+    past_incidents: list[dict]                      
+    runbooks: list[dict]                             
+    action_plan: dict                              
+    action_result: str                            
+    verification: dict                         
+    retry_count: Annotated[int, operator.add]     
+    success: bool                                 
     kagent_session_id: str
 
 
-KAGENT_SESSION_URL = "http://127.0.0.1:8083/api/sessions"
-KAGENT_EXECUTE_URL = "http://127.0.0.1:8080" # Port wykonawczy kAgenta
-
-
 def extract_text_aggressively(chunk):
-    """
-    Ekstrakcja tekstu niezależnie od tego, czy agent użył pól 'text', 'data' czy 'artifacts'.
-    """
     try:
-        # 1. Przeszukaj historię (jeśli dostępna)
         if hasattr(chunk, 'history'):
             for h in chunk.history:
                 for part in h.parts:
-                    # Sprawdź 'text' (stary format)
                     if hasattr(part, 'text') and part.text:
                         return part.text
-                    # Sprawdź 'data' (nowy format struct_value)
                     if hasattr(part, 'data') and part.data.struct_value:
-                        # Użyj .get() dla bezpiecznego dostępu do pól Protobufa
                         fields = part.data.struct_value.fields
                         if 'args' in fields:
                             args = fields['args'].struct_value.fields
@@ -110,15 +94,13 @@ def extract_text_aggressively(chunk):
                                 q_json = args['questions'].string_value
                                 return json.loads(q_json)[0]['question']
                                 
-        # 2. Przeszukaj artefakty (jeśli są w tasku)
         if hasattr(chunk, 'task') and chunk.task.artifacts:
             for art in chunk.task.artifacts:
                 for part in art.parts:
                     if hasattr(part, 'text') and part.text:
-                        # Spróbuj sparsować, jeśli to JSON w tekście
                         try:
                             data = json.loads(part.text)
-                            return data['parameters']['questions'] # lub odpowiednia ścieżka
+                            return data['parameters']['questions']
                         except:
                             return part.text
     except Exception as e:
@@ -129,17 +111,14 @@ def extract_text_aggressively(chunk):
 
 def extract_text_safely(chunk):
     try:
-        # 1. Sprawdź, czy w ogóle jest obiekt message w chunku
         if chunk.HasField('message'):
             msg = chunk.message
-            # Jeśli to Protobuf, to może mieć listę 'content' lub 'parts'
             if hasattr(msg, 'content'):
                 return str(msg.content)
             if hasattr(msg, 'parts'):
                 return "".join([p.text for p in msg.parts if hasattr(p, 'text')])
-            return str(msg) # Ostateczność: zrzut obiektu
+            return str(msg)
             
-        # 2. Sprawdź, czy agent nie zwraca wyniku w polu 'task' (częste w A2A 0.3.0)
         if chunk.HasField('task'):
             return str(chunk.task)
             
@@ -149,28 +128,22 @@ def extract_text_safely(chunk):
     
 
 async def call_llm(prompt: str) -> str:
-    # 1. KONFIGURACJA
-    SESSION_MANAGER_URL = "http://127.0.0.1:8083/api/sessions"
-    PROXY_KAGENT_URL = "http://127.0.0.1:8080"
-    
-    # GENERUJEMY ID SESJI I WŁAŚCIWEGO UŻYTKOWNIKA BRAMY
     forced_session_id = f"ctx-{uuid.uuid4()}"
-    forced_brama_user = f"A2A_USER_{forced_session_id}"
+    forced_gate_user = f"A2A_USER_{forced_session_id}"
     
-    # 2. ZAPISUJEMY SESJĘ W BAZIE
     async with httpx.AsyncClient() as init_client:
         session_payload = {
             "id": forced_session_id,
             "agent_ref": "kagent__NS__krag_agent",
-            "user_id": forced_brama_user
+            "user_id": forced_gate_user
         }
         
         headers_for_8083 = {
-            "X-User-Id": forced_brama_user,
-            "X-Authenticated-Userid": forced_brama_user,
-            "X-Forwarded-User": forced_brama_user,
-            "kagent-user-id": forced_brama_user,
-            "Authorization": f"Bearer {forced_brama_user}",
+            "X-User-Id": forced_gate_user,
+            "X-Authenticated-Userid": forced_gate_user,
+            "X-Forwarded-User": forced_gate_user,
+            "kagent-user-id": forced_gate_user,
+            "Authorization": f"Bearer {forced_gate_user}",
             "Content-Type": "application/json"
         }
 
@@ -183,14 +156,12 @@ async def call_llm(prompt: str) -> str:
         session_resp.raise_for_status()
         session_data = session_resp.json()
         saved_session_id = session_data["data"]["id"]
-        logger.info(f"[krag] 💥 Baza zsynchronizowana -> ID: {saved_session_id}")
+        logger.info(f"[krag] Baza zsynchronizowana -> ID: {saved_session_id}")
 
-    # 3. POBIERAMY KARTĘ AGENTA
     async with httpx.AsyncClient() as metadata_client:
         resolver = A2ACardResolver(httpx_client=metadata_client, base_url=PROXY_KAGENT_URL)
         real_agent_card = await resolver.get_agent_card()
 
-    # 4. STRZAŁ PO ODPOWIEDŹ Z WYDŁUŻONYM TIMEOUTEM
     async with httpx.AsyncClient(base_url=PROXY_KAGENT_URL, timeout=180.0) as rpc_http_client:
         config = ClientConfig(streaming=False)
         client = await create_client(agent=real_agent_card, client_config=config)
@@ -202,7 +173,7 @@ async def call_llm(prompt: str) -> str:
         message.context_id = saved_session_id
         req = SendMessageRequest(message=message)
         
-        logger.info(f"[krag] ⏳ Agent myśli... (timeout 180s)...")
+        logger.info(f"[krag] Agent myśli... (timeout 180s)...")
         
         raw_chunks = []
         async for chunk in client.send_message(req):
@@ -218,23 +189,8 @@ async def call_llm(prompt: str) -> str:
         if not agent_response_text:
             agent_response_text = "Odebrano puste chunki lub brak pola tekstowego."
 
-        logger.info(f"[krag] ✅ SUKCES OSTATECZNY!")
+        logger.info(f"[krag] SUKCES!")
         return agent_response_text
-
-
-def call_llm_ollama(prompt: str) -> str:
-    """Sends a prompt to Ollama and returns the response as a string."""
-    response = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json",
-        },
-    )
-    response.raise_for_status()
-    return response.json()["response"]
 
 
 def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
@@ -247,9 +203,6 @@ def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
     alert_name = clean_alert.pop('alertname', 'unknown alert').lower()
     severity = clean_alert.pop('severity', 'info').lower()
     description = clean_alert.pop('description', 'no diagnostic description provided.')
-
-    reset_color = "\u001b[0m"
-    bold_white = "\u001b[1;37m"
 
     if severity == "critical":
         icon = "🔴"
@@ -268,10 +221,6 @@ def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
     ### 🔬 Context & Resolution
     {description}
     """
-    
-    # prompt_for_builtin = (
-    #     f"SRE Task. Our local diagnostic system received an alert: {clean_alert}.\n"
-    # )
     
     try:
         logger.info("[kagent-init] Przekazuję raport do wbudowanego krag-agent...")
@@ -292,10 +241,6 @@ def node_trigger_alert_info_krag(state: AgentState) -> AgentState:
 
 
 def node_fetch_logs(state: AgentState) -> AgentState:
-    """
-    Node 1: Fetches logs and pod description from K8s.
-    How does it know which pod? From the alert that came from Alertmanager.
-    """
     alert = state["alert"]
     pod_name = alert.get("pod", "unknown")
     namespace = alert.get("namespace", "default")
@@ -309,10 +254,6 @@ def node_fetch_logs(state: AgentState) -> AgentState:
 
 
 def node_query_rag(state: AgentState) -> AgentState:
-    """
-    Node 2: Queries ChromaDB for similar incidents and runbooks.
-    Uses the alert description as a vector query.
-    """
     alert = state["alert"]
     query = f"{alert.get('alertname', '')} {alert.get('description', '')}"
 
@@ -327,10 +268,6 @@ def node_query_rag(state: AgentState) -> AgentState:
 
 
 async def node_reason(state: AgentState) -> AgentState:
-    """
-    Node 3: LLM analyzes all the data and decides what to do.
-    Receives: alert + logs + history + runbooks → returns action plan.
-    """
     prompt = build_analysis_prompt(
         alert=state["alert"],
         logs=state["logs"],
@@ -371,10 +308,6 @@ async def node_reason(state: AgentState) -> AgentState:
 
 
 def node_execute(state: AgentState) -> AgentState:
-    """
-    Node 4: Executes a repair action on the K8s cluster.
-    The action comes from the LLM's action plan.
-    """
     plan = state["action_plan"]
     action = plan.get("action")
     target = plan.get("target")
@@ -398,10 +331,6 @@ def node_execute(state: AgentState) -> AgentState:
 
 
 async def node_verify(state: AgentState) -> AgentState:
-    """
-    Node 5: Waits a moment and checks if the pod has recovered.
-    If not — increments retry_count (edge decides whether to try again).
-    """
     logger.info("[verify] Waiting 30s for stabilization...")
     time.sleep(30)
 
@@ -439,10 +368,6 @@ async def node_verify(state: AgentState) -> AgentState:
 
 
 async def node_store_memory(state: AgentState) -> AgentState:
-    """
-    Node 6: Stores the resolved incident in ChromaDB.
-    Called ONLY when the repair is successful.
-    """
     prompt = build_summary_prompt(
         alert=state["alert"],
         action=str(state["action_plan"]),
@@ -473,10 +398,6 @@ async def node_store_memory(state: AgentState) -> AgentState:
 
 
 def edge_should_retry(state: AgentState) -> str:
-    """
-    After verification: should we retry, or terminate?
-    Returns the name of the next node.
-    """
     if state.get("success", False):
         logger.info("[edge] Repair successful. Routing to store_memory.")
         return "store_memory"
@@ -492,10 +413,6 @@ def edge_should_retry(state: AgentState) -> str:
 
 
 def node_trigger_builtin_krag(state: AgentState) -> AgentState:
-    """
-    Węzeł, który bierze rozwiązanie z lokalnego modelu i pcha je do 
-    wbudowanego w klaster 'kagent', aby ten dokończył dzieła (np. powiadomił zespół).
-    """
     KAGENT_A2A_URL = "http://127.0.0.1:8146/alert/"
     
     local_solution = state.get("action_result", "Brak szczegółów")
@@ -557,14 +474,12 @@ def build_graph():
 
     try:
         compiled_graph = graph.compile()
-        # Generuje piękny plik PNG przy użyciu wewnętrznego silnika Mermaid/PyGraphviz
         png_bytes = compiled_graph.get_graph().draw_mermaid_png()
         with open("krag_graph.png", "wb") as f:
             f.write(png_bytes)
         logger.info("[krag] Ostateczna wizualizacja grafu zapisana do pliku: krag_graph.png")
     except Exception as e:
         logger.warning(f"[krag] Nie udało się wygenerować obrazka (brak wymaganych bibliotek systemowych): {e}")
-        # Rezerwowy zapis do formatu tekstowego Mermaid (wklejasz na mermaid.live i masz wykres)
         try:
             with open("krag_graph.md", "w") as f:
                 f.write(f"```mermaid\n{graph.compile().get_graph().draw_mermaid()}\n```")
@@ -579,17 +494,11 @@ krag_graph = build_graph()
 
 
 async def run_agent(alert: dict) -> dict:
-    """
-    Public API — invoke the agent with an alert.
-    alert = {"alertname": "PodCrashLooping", "pod": "crash-test",
-              "namespace": "default", "description": "..."}
-    """
     session_id = "unknown"
     
-    # 1. Rejestracja sesji w kAgent Session Manager (:8083)
     try:
         session_payload = {"agent_ref": "kagent__NS__krag_agent"}
-        resp = requests.post(KAGENT_SESSION_URL, json=session_payload, timeout=5.0)
+        resp = requests.post(SESSION_MANAGER_URL, json=session_payload, timeout=5.0)
         resp.raise_for_status()
         session_id = resp.json()["data"]["id"]
         logger.info(f"[krag-init] 🎉 Pomyślnie zainicjalizowano sesję kAgenta: {session_id}")
