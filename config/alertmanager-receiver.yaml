@@ -1,15 +1,3 @@
-# NOTE: This file is kept for reference only.
-# The AlertmanagerConfig is now defined inside experiments/oom-selfheal-experiment.yaml
-# under namespace: krag-demo — that is the namespace where it must live.
-#
-# WHY: The Prometheus Operator automatically injects a namespace matcher into every
-# AlertmanagerConfig route equal to the config's own namespace. Placing this in
-# "monitoring" namespace caused it to only match alerts with namespace="monitoring",
-# silently ignoring all krag-demo alerts. Moving it to krag-demo fixes the routing.
-#
-# APPLY ORDER:
-#   kubectl apply -f config/alert-rule.yaml               (PrometheusRule, in monitoring)
-#   kubectl apply -f experiments/oom-selfheal-experiment.yaml  (everything else, incl. this config)
 apiVersion: monitoring.coreos.com/v1alpha1
 kind: AlertmanagerConfig
 metadata:
@@ -27,7 +15,5 @@ spec:
   receivers:
     - name: krag-webhook
       webhookConfigs:
-        # Find correct IP: docker network inspect kind | Select-String '"Gateway"'
-        # - url: "http://172.18.0.1:8888/webhook"
         - url: "http://192.168.65.254:8888/webhook"
           sendResolved: false
