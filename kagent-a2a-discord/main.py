@@ -29,13 +29,10 @@ register_handlers(bot)
 
 app = FastAPI()
 
-# Funkcja pomocnicza realizująca operacje na Discordzie
 async def send_discord_response(channel, response):
-    # Pokazujemy potok pisania na kanale
     await channel.typing()
     
     if len(response) <= MAX_LENGTH:
-        # NAPRAWIONE: message.channel.send zamiast message.send
         await channel.send(response)
     else:
         chunks = split_by_lines(response)
@@ -45,15 +42,12 @@ async def send_discord_response(channel, response):
 
 @app.post("/alert")
 def add_alert(response: str):
-    """Endpoint przyjmujący odpowiedź od agenta i zlecający wysyłkę na Discorda"""
     if not SET:
-        return {"status": "error", "message": "Brak wiadomości w historii (SET jest pusty)"}
+        return {"status": "error", "message": "No message in SET"}
 
-    # Bierzemy pierwszą (lub ostatnią) wiadomość z historii, żeby wyciągnąć z niej kanał
     for channel in SET:
-        print("\n\nOstatnia wiadomość (użyty kanał):", channel.name)
+        print("\n\nChannel name:", channel.name)
     
-        # Przekazujemy wykonanie bezpiecznie do pętli zdarzeń bota
         asyncio.run_coroutine_threadsafe(
             send_discord_response(channel, response), 
             bot.loop

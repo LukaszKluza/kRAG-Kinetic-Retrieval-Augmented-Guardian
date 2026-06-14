@@ -1,30 +1,3 @@
-"""
-graph.py — Main logic of the agent as a LangGraph.
-
-State graph (StateGraph) defines the decision flow:
-
-  [START]
-     │
-     ▼
- fetch_logs ─────────────────────────────────────┐
-     │                                           │
-     ▼                                           │
- query_rag (searching in history + runbooks)     │
-     │                                           │
-     ▼                                           │
-  reason (LLM decides what to do)                │
-     │                                           │
-     ▼                                           │
-  execute (kubectl action)                       │
-     │                                           │
-     ▼                                           │
-  verify ──── success? ──── NO ──── (max 2x) ────┘
-     │
-     │ YES
-     ▼
-store_memory ──► [END]
-"""
-
 import asyncio
 import json
 import time
@@ -57,7 +30,7 @@ from agent.prompts import (
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434"           # locally
+OLLAMA_URL = "http://localhost:11434"
 SESSION_MANAGER_URL = "http://127.0.0.1:8083/api/sessions"
 PROXY_KAGENT_URL = "http://127.0.0.1:8080"
 LLM_MODEL = "llama3.2"
@@ -104,7 +77,7 @@ def extract_text_aggressively(chunk):
                         except:
                             return part.text
     except Exception as e:
-        return f"Błąd parsowania: {e}"
+        return f"Parsing error: {e}"
     
     return None
 
@@ -123,7 +96,7 @@ def extract_text_safely(chunk):
             return str(chunk.task)
             
     except Exception as e:
-        return f"Błąd parsowania: {e}"
+        return f"Parsing error: {e}"
     return None
     
 
@@ -477,9 +450,9 @@ def build_graph():
         png_bytes = compiled_graph.get_graph().draw_mermaid_png()
         with open("krag_graph.png", "wb") as f:
             f.write(png_bytes)
-        logger.info("[krag] Ostateczna wizualizacja grafu zapisana do pliku: krag_graph.png")
+        logger.info("[krag] Wizualizacja grafu zapisana do pliku: krag_graph.png")
     except Exception as e:
-        logger.warning(f"[krag] Nie udało się wygenerować obrazka (brak wymaganych bibliotek systemowych): {e}")
+        logger.warning(f"[krag] Nie udało się wygenerować obrazka: {e}")
         try:
             with open("krag_graph.md", "w") as f:
                 f.write(f"```mermaid\n{graph.compile().get_graph().draw_mermaid()}\n```")
@@ -494,8 +467,6 @@ krag_graph = build_graph()
 
 
 async def run_agent(alert: dict) -> dict:
-    session_id = "unknown"
-    
     try:
         session_payload = {"agent_ref": "kagent__NS__krag_agent"}
         resp = requests.post(SESSION_MANAGER_URL, json=session_payload, timeout=5.0)

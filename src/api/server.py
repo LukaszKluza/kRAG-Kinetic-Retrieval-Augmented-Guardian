@@ -1,18 +1,3 @@
-"""
-server.py — HTTP server receiving webhooks from Alertmanager.
-
-Alertmanager sends POST request to /webhook when an alert is triggered.
-We parse the payload and asynchronously run graph.run_agent().
-
-Testing with a sample alert:
-    curl -X POST http://localhost:8888/webhook \
-      -H "Content-Type: application/json" \
-      -d '{"alerts": [{"labels": {"alertname": "PodCrashLooping",
-           "pod": "crash-test", "namespace": "default",
-           "severity": "critical"},
-           "annotations": {"description": "Pod crushes 5 times"}}]}'
-"""
-
 import logging
 import asyncio
 from fastapi import FastAPI, BackgroundTasks, Request
@@ -71,7 +56,6 @@ class AlertmanagerPayload(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Health check — K8s uses this to check if the server is alive."""
     return {"status": "ok", "service": "krag-webhook"}
 
 

@@ -1,60 +1,17 @@
-# =============================================================================
-# kRAG Alert Rules — PrometheusRule
-# =============================================================================
-#
-# This PrometheusRule is picked up by the Prometheus Operator
-# (part of kube-prometheus-stack) and loaded into Prometheus automatically.
-#
-# The rule fires a PodCrashLooping alert when the crasher-0 pod in the
-# krag-demo namespace has restarted 3+ times. Alertmanager then routes
-# this alert to the kRAG webhook (see config/alertmanager-receiver.yaml).
-#
-# LABEL REQUIREMENTS:
-#   The labels below must match your Prometheus Operator's ruleSelector.
-#   Default kube-prometheus-stack uses: release=kube-prometheus
-#   If your installation differs, check with:
-#     kubectl get prometheus -n monitoring -o yaml | grep -A5 ruleSelector
-#
-# NAMESPACE:
-#   Deployed to "monitoring" because that is where Prometheus lives.
-#   The RULE itself monitors the "krag-demo" namespace via PromQL.
-#
-# APPLY:
-#   kubectl apply -f config/alert-rule.yaml
-#
-# VERIFY (after 1-2 minutes):
-#   kubectl port-forward -n monitoring svc/kube-prometheus-kube-prome-prometheus 9090:9090
-#   Open: http://localhost:9090/rules  (look for "krag-demo.rules")
-# =============================================================================
-
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: krag-demo-alerts
   namespace: monitoring
   labels:
-    # Standard kube-prometheus-stack selector labels — adjust if needed
     release: kube-prometheus
     app: kube-prometheus-stack
     app.kubernetes.io/part-of: kube-prometheus-stack
 spec:
   groups:
     - name: krag-demo.rules
-      # Evaluate every 15 seconds for fast alert detection during the demo
       interval: 15s
       rules:
-        # -----------------------------------------------------------------------
-        # PodCrashLooping
-        # Fires when crasher-0 in krag-demo has restarted 3 or more times.
-        #
-        # kube_pod_container_status_restarts_total is a cumulative counter
-        # provided by kube-state-metrics. It only goes up — once >= 3,
-        # the alert fires and stays firing until manually resolved or pod is gone.
-        #
-        # The alert labels "pod" and "namespace" come AUTOMATICALLY from the
-        # kube-state-metrics metric labels. kRAG's server.py reads these to know
-        # which pod to investigate: alert.labels.pod / alert.labels.namespace
-        # -----------------------------------------------------------------------
         - alert: PodCrashLooping
           expr: |
             kube_pod_container_status_restarts_total{

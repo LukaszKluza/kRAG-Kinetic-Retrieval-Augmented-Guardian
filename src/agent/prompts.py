@@ -1,11 +1,3 @@
-"""
-prompts.py — Prompt templates built dynamically in Python.
-
-Instead of statically entering the prompt in YAML (kagent.yaml),
-we build it here based on data from K8s, RAG, and history.
-"""
-
-    
 def build_analysis_prompt(
     alert: dict,
     logs: str,
@@ -13,11 +5,6 @@ def build_analysis_prompt(
     past_incidents: list[dict],
     runbooks: list[dict],
 ) -> str:
-    """
-    Builds the prompt for incident analysis.
-    The LLM receives all the data and decides what to do.
-    """
-
     past_context = ""
     if past_incidents:
         past_context = "\n\n## Similar Incidents from the past:\n"

@@ -1,14 +1,3 @@
-"""
-ingest_docs.py — Loads runbooks and K8s documentation into ChromaDB.
-
-Run once before starting the agent (and every time you add new runbooks):
-    python ingestion/ingest_docs.py
-
-What is loaded:
-- Built-in K8s runbooks (written manually)
-- Optionally: .md files from the runbooks directory
-"""
-
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -19,9 +8,6 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("krag.ingest")
 
-
-# ── Built-in K8s runbooks ──────────────────────────────────────────────────────
-# Add your own runbooks here. The more, the smarter the agent becomes.
 
 RUNBOOKS = [
     {
@@ -135,7 +121,6 @@ def main():
         except Exception as e:
             logger.error(f"  ✗ {rb['title']}: {e}")
 
-    # Opcjonalnie: ładuj pliki .md z katalogu runbooks/
     runbooks_dir = os.path.join(os.path.dirname(__file__), "..", "runbooks")
     if os.path.isdir(runbooks_dir):
         for filename in os.listdir(runbooks_dir):
